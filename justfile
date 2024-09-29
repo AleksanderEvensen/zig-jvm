@@ -1,3 +1,5 @@
 compile-java:
     javac -d java-out ./java/Main.java
-    java -cp java-out Main
+
+java-parse:
+    javap -v -cp java-out Main
