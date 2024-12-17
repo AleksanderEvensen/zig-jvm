@@ -4,6 +4,18 @@ Just like my other project [the Rust JVM](https://github.com/AleksanderEvensen/R
 I will also utilize this opportunity to improve on my old design.
 I'll admit that the Rust version wasn't very "Rusty" and could've been solved in a much better way.
 
+Current Java Code:
+```java
+public class Main {
+    public static void main(String[] args) {
+        int a = 0;
+        int b = 0;
+        int c = a + b;
+        System.exit(c);
+    }
+}
+```
+
 Current Output of the program:
 ```
 Magic: 0xCAFEBABE
