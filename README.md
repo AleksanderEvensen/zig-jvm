@@ -7,10 +7,10 @@ I'll admit that the Rust version wasn't very "Rusty" and could've been solved in
 Current Output of the program:
 ```
 Magic: 0xCAFEBABE
-Version: 66.0
+Version: 67.0
 This Class: #14 'Main'
 Super Class: #4 'java/lang/Object'
-Constant pool(20):
+Constant Pool(20):
   #1: MethodRef: #2.#3 'java/lang/Object.<init>:()V'
   #2: Class: #4 'java/lang/Object'
   #3: NameAndType: #5.#6 '<init>:()V'
@@ -36,16 +36,28 @@ Methods(2):
     Code
       Max Stack: 1
       Max Locals: 1
-      Code Length: 5
+      Code Length: 3
       Instructions:
-        { 42, 183, 0, 1, 177 }
+        0: aload_0
+        1: invokespecial #1
+        2: return
   #2: main:([Ljava/lang/String;)V
     Code
       Max Stack: 2
       Max Locals: 4
-      Code Length: 13
+      Code Length: 11
       Instructions:
-        { 3, 60, 3, 61, 27, 28, 96, 62, 29, 184, 0, 7, 177 }
+        0: iconst_0
+        1: istore_1
+        2: iconst_0
+        3: istore_2
+        4: iload_1
+        5: iload_2
+        6: iadd
+        7: istore_3
+        8: iload_3
+        9: invokestatic #7
+        10: return
 ```
 
 
