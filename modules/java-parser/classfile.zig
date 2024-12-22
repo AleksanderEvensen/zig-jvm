@@ -24,7 +24,7 @@ pub fn ClassFileReader() type {
                 .minor_version = try reader.readInt(u16, .big),
                 .major_version = try reader.readInt(u16, .big),
                 .constant_pool = try self.readConstantPool(reader),
-                .access_flags = try reader.readInt(u16, .big),
+                .access_flags = @bitCast(try reader.readInt(u16, .big)),
                 .this_class = try self.readThisClass(reader),
                 .super_class = try self.readSuperClass(reader),
                 .interfaces = try self.readBytes(reader, @intCast(try reader.readInt(u16, .big))), // TODO: Replace with readInterfaces
@@ -37,57 +37,136 @@ pub fn ClassFileReader() type {
         fn readConstantPool(self: *Self, reader: std.io.AnyReader) ![]ConstantPoolEntry {
             const cp_count: usize = @intCast(try reader.readInt(u16, .big) - 1);
 
-            var constant_pool: []ConstantPoolEntry = try self.allocator.alloc(ConstantPoolEntry, cp_count);
+            const RawConstantPool = struct {
+                tag: ConstantPoolTag,
+                bytes: []u8,
+                index: usize,
+                initialzed: bool,
+            };
+
+            var raw_constant_pool = try std.ArrayList(RawConstantPool).initCapacity(self.allocator, cp_count);
+            defer raw_constant_pool.deinit();
+            var constant_pool = try self.allocator.alloc(ConstantPoolEntry, cp_count);
 
             for (0..cp_count) |i| {
-                const tag: ConstantPoolTag = @enumFromInt(try reader.readInt(u8, .big));
+                const tag_byte = try reader.readByte();
+                const tag = std.meta.intToEnum(ConstantPoolTag, tag_byte) catch {
+                    std.debug.panic("Unrecognized constant pool tag: {d}", .{tag_byte});
+                };
 
-                switch (tag) {
-                    ConstantPoolTag.Class => constant_pool[i] = ConstantPoolEntry{
-                        .Class = CP_Class{
-                            .name_index = try reader.readInt(u16, .big),
-                            .name = null,
-                        },
-                    },
-
-                    ConstantPoolTag.MethodRef => constant_pool[i] = ConstantPoolEntry{
-                        .MethodRef = .{
-                            .class_index = try reader.readInt(u16, .big),
-                            .name_and_type_index = try reader.readInt(u16, .big),
-                            .class = null,
-                            .name_and_type = null,
-                        },
-                    },
-
-                    ConstantPoolTag.NameAndType => constant_pool[i] = ConstantPoolEntry{
-                        .NameAndType = .{
-                            .name_index = try reader.readInt(u16, .big),
-                            .descriptor_index = try reader.readInt(u16, .big),
-                            .name = null,
-                            .descriptor = null,
-                        },
-                    },
-
-                    ConstantPoolTag.Utf8 => constant_pool[i] = ConstantPoolEntry{
-                        .Utf8 = try self.readBytes(reader, try reader.readInt(u16, .big)),
-                    },
-                }
+                try raw_constant_pool.append(.{
+                    .tag = tag,
+                    .bytes = try self.readBytes(reader, switch (tag) {
+                        .Class => 2,
+                        .MethodRef, .FieldRef, .InterfaceMethodRef => 4,
+                        .String => 2,
+                        .NameAndType => 4,
+                        .Utf8 => try reader.readInt(u16, .big),
+                    }),
+                    .index = i,
+                    .initialzed = false,
+                });
             }
 
-            // Fill in pointers once everything is parsed
+            const CpInitializer = struct {
+                const Dis = @This();
+
+                pub fn init(
+                    this: *Dis,
+                    index: usize,
+                    cp: *[]ConstantPoolEntry,
+                    raw_cp: *std.ArrayList(RawConstantPool),
+                ) *ConstantPoolEntry {
+                    const raw = raw_cp.items[index - 1];
+                    if (raw.initialzed) {
+                        return &cp.*[index - 1];
+                    }
+                    raw_cp.items[index - 1].initialzed = true;
+
+                    const readBE = struct {
+                        pub fn inner(comptime T: type, bytes: *const [@divExact(@typeInfo(T).Int.bits, 8)]u8) T {
+                            return std.mem.readInt(T, bytes, .big);
+                        }
+                    }.inner;
+
+                    cp.*[index - 1] = switch (raw.tag) {
+                        .Class => ConstantPoolEntry{
+                            .Class = CP_Class{
+                                .name_index = readBE(u16, raw.bytes[0..2]),
+                                .name = this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).*.Utf8,
+                            },
+                        },
+
+                        .MethodRef => ConstantPoolEntry{
+                            .MethodRef = .{
+                                .class_index = readBE(u16, raw.bytes[0..2]),
+                                .name_and_type_index = readBE(u16, raw.bytes[2..4]),
+                                .class = &this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).Class,
+                                .name_and_type = &this.init(readBE(u16, raw.bytes[2..4]), cp, raw_cp).NameAndType,
+                            },
+                        },
+
+                        .FieldRef => ConstantPoolEntry{
+                            .FieldRef = .{
+                                .class_index = readBE(u16, raw.bytes[0..2]),
+                                .name_and_type_index = readBE(u16, raw.bytes[2..4]),
+                                .class = &this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).Class,
+                                .name_and_type = &this.init(readBE(u16, raw.bytes[2..4]), cp, raw_cp).NameAndType,
+                            },
+                        },
+
+                        .InterfaceMethodRef => ConstantPoolEntry{
+                            .InterfaceMethodRef = .{
+                                .class_index = readBE(u16, raw.bytes[0..2]),
+                                .name_and_type_index = readBE(u16, raw.bytes[2..4]),
+                                .class = &this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).Class,
+                                .name_and_type = &this.init(readBE(u16, raw.bytes[2..4]), cp, raw_cp).NameAndType,
+                            },
+                        },
+
+                        .NameAndType => ConstantPoolEntry{
+                            .NameAndType = .{
+                                .name_index = readBE(u16, raw.bytes[0..2]),
+                                .descriptor_index = readBE(u16, raw.bytes[2..4]),
+                                .name = this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).*.Utf8,
+                                .descriptor = this.init(readBE(u16, raw.bytes[2..4]), cp, raw_cp).*.Utf8,
+                            },
+                        },
+
+                        .Utf8 => ConstantPoolEntry{
+                            .Utf8 = raw.bytes,
+                        },
+
+                        .String => ConstantPoolEntry{
+                            .String = CP_String{
+                                .string_index = readBE(u16, raw.bytes[0..2]),
+                                .string = this.init(readBE(u16, raw.bytes[0..2]), cp, raw_cp).*.Utf8,
+                            },
+                        },
+                    };
+                    return &cp.*[index - 1];
+                }
+            };
+
+            var initializer = CpInitializer{};
+            for (0..cp_count) |i| {
+                if (raw_constant_pool.items[i].initialzed) continue;
+
+                _ = initializer.init(i + 1, &constant_pool, &raw_constant_pool);
+            }
+
             for (0..constant_pool.len) |i| {
                 switch (constant_pool[i]) {
-                    .Class => |*v| {
-                        v.*.name = &constant_pool[v.name_index - 1].Utf8;
-                    },
-                    .MethodRef => |*v| {
-                        v.*.class = &constant_pool[v.class_index - 1].Class;
-                        v.*.name_and_type = &constant_pool[v.name_and_type_index - 1].NameAndType;
+                    .Class => |*v| v.*.name = constant_pool[v.*.name_index - 1].Utf8,
+                    .MethodRef, .FieldRef, .InterfaceMethodRef => |*v| {
+                        v.*.class = &constant_pool[v.*.class_index - 1].Class;
+                        v.*.name_and_type = &constant_pool[v.*.name_and_type_index - 1].NameAndType;
                     },
                     .NameAndType => |*v| {
-                        v.*.name = &constant_pool[v.name_index - 1].Utf8;
-                        v.*.descriptor = &constant_pool[v.descriptor_index - 1].Utf8;
+                        v.*.name = constant_pool[v.*.name_index - 1].Utf8;
+                        v.*.descriptor = constant_pool[v.*.descriptor_index - 1].Utf8;
                     },
+                    .String => |*v| v.*.string = constant_pool[v.*.string_index - 1].Utf8,
 
                     else => {},
                 }
@@ -108,8 +187,8 @@ pub fn ClassFileReader() type {
         fn readSuperClass(self: *Self, reader: std.io.AnyReader) !*CP_Class {
             // TODO: Replace with error handling
             const cp = self.constant_pool orelse std.debug.panic("Failed to read #super_class: Constant pool is not initialized", .{});
-
             const super_class_index = try reader.readInt(u16, .big);
+
             return &cp[super_class_index - 1].Class;
         }
 
@@ -120,9 +199,9 @@ pub fn ClassFileReader() type {
 
             for (0..method_count) |i| {
                 methods[i] = MethodInfo{
-                    .access_flags = try reader.readInt(u16, .big),
-                    .name = &self.constant_pool.?[try reader.readInt(u16, .big) - 1].Utf8,
-                    .descriptor = &self.constant_pool.?[try reader.readInt(u16, .big) - 1].Utf8,
+                    .access_flags = @bitCast(try reader.readInt(u16, .big)),
+                    .name = self.constant_pool.?[try reader.readInt(u16, .big) - 1].Utf8,
+                    .descriptor = self.constant_pool.?[try reader.readInt(u16, .big) - 1].Utf8,
                     .attributes = try self.readAttributes(reader),
                 };
             }
@@ -218,7 +297,20 @@ pub const ClassFile = struct {
     minor_version: u16,
     major_version: u16,
     constant_pool: []ConstantPoolEntry,
-    access_flags: u16,
+    access_flags: packed struct(u16) {
+        public: bool = false,
+        _1: u3 = 0,
+        final: bool = false,
+        super: bool = false,
+        _2: u3 = 0,
+        interface: bool = false,
+        abstract: bool = false,
+        _5: u1 = 0,
+        synthetic: bool = false,
+        annotation: bool = false,
+        _enum: bool = false,
+        module: bool = false,
+    },
     this_class: *CP_Class,
     super_class: *CP_Class,
     interfaces: []u8,
@@ -239,13 +331,14 @@ pub const ClassFile = struct {
             self.minor_version,
 
             self.this_class.name_index,
-            self.this_class.name.?.*,
+            self.this_class.name,
 
             self.super_class.name_index,
-            self.super_class.name.?.*,
+            self.super_class.name,
         });
 
         print("Constant Pool({}):\n", .{self.constant_pool.len});
+
         for (self.constant_pool, 1..) |cp_info, i| {
             print("  #{}: {s}\n", .{ i, cp_info.toString(alloc) });
         }
@@ -254,8 +347,8 @@ pub const ClassFile = struct {
         for (self.methods, 1..) |method, i| {
             print("  #{}: {s}:{s}\n", .{
                 i,
-                method.name.*,
-                method.descriptor.*,
+                method.name,
+                method.descriptor,
             });
             for (method.attributes) |attrib| {
                 switch (attrib) {
@@ -290,12 +383,12 @@ pub const ClassFile = struct {
     }
 };
 
-const ConstantPoolTag = enum(u8) {
+pub const ConstantPoolTag = enum(u8) {
     Class = 7,
-    // FieldRef = 9,
+    FieldRef = 9,
     MethodRef = 10,
-    // InterfaceMethodRef = 11,
-    // String = 8,
+    InterfaceMethodRef = 11,
+    String = 8,
     // Integer = 3,
     // Float = 4,
     // Long = 5,
@@ -309,82 +402,93 @@ const ConstantPoolTag = enum(u8) {
     // Package = 20,
 };
 
-const ConstantPoolEntry = union(ConstantPoolTag) {
+pub const ConstantPoolEntry = union(ConstantPoolTag) {
     Class: CP_Class,
-    MethodRef: CP_MethodRef,
+    FieldRef: CP_Ref,
+    MethodRef: CP_Ref,
+    InterfaceMethodRef: CP_Ref,
+    String: CP_String,
     NameAndType: CP_NameAndType,
     Utf8: []u8,
 
     fn toString(self: ConstantPoolEntry, alloc: std.mem.Allocator) []u8 {
-        switch (self) {
-            ConstantPoolEntry.Class => |v| {
-                return std.fmt.allocPrint(alloc, "Class: #{} '{s}'", .{
-                    v.name_index,
-                    v.name.?.*,
-                }) catch {
-                    unreachable;
-                };
-            },
-            ConstantPoolEntry.MethodRef => |v| {
-                return std.fmt.allocPrint(alloc, "MethodRef: #{}.#{} '{s}.{s}:{s}'", .{
-                    v.class_index,
-                    v.name_and_type_index,
-                    v.class.?.name.?.*,
-                    v.name_and_type.?.name.?.*,
-                    v.name_and_type.?.descriptor.?.*,
-                }) catch {
-                    unreachable;
-                };
-            },
-            ConstantPoolEntry.NameAndType => |v| {
-                return std.fmt.allocPrint(alloc, "NameAndType: #{}.#{} '{s}:{s}'", .{
-                    v.name_index,
-                    v.descriptor_index,
-                    v.name.?.*,
-                    v.descriptor.?.*,
-                }) catch {
-                    unreachable;
-                };
-            },
-            ConstantPoolEntry.Utf8 => |str| {
-                return std.fmt.allocPrint(alloc, "Utf8: '{s}'", .{str}) catch {
-                    unreachable;
-                };
-            },
-        }
+        return switch (self) {
+            ConstantPoolEntry.Class => |v| std.fmt.allocPrint(alloc, "Class: #{} '{s}'", .{
+                v.name_index,
+                v.name,
+            }) catch unreachable,
+            ConstantPoolEntry.MethodRef => |v| std.fmt.allocPrint(alloc, "MethodRef: #{}.#{} '{s}.{s}:{s}'", .{
+                v.class_index,
+                v.name_and_type_index,
+                v.class.name,
+                v.name_and_type.name,
+                v.name_and_type.descriptor,
+            }) catch unreachable,
+            ConstantPoolEntry.NameAndType => |v| std.fmt.allocPrint(alloc, "NameAndType: #{}.#{} '{s}:{s}'", .{
+                v.name_index,
+                v.descriptor_index,
+                v.name,
+                v.descriptor,
+            }) catch unreachable,
+            ConstantPoolEntry.Utf8 => |str| std.fmt.allocPrint(alloc, "Utf8: '{s}'", .{str}) catch unreachable,
+            ConstantPoolEntry.String => |v| std.fmt.allocPrint(alloc, "String: #{} '{s}'", .{ v.string_index, v.string }) catch unreachable,
+            else => std.fmt.allocPrint(alloc, "Unknown: Unimplemented", .{}) catch unreachable,
+        };
     }
 };
 
-const CP_Class = struct {
+pub const CP_Class = struct {
     name_index: u16,
 
-    name: ?*[]u8,
+    name: []u8,
 };
 
-const CP_MethodRef = struct {
+pub const CP_Ref = struct {
     class_index: u16,
     name_and_type_index: u16,
 
-    class: ?*CP_Class,
-    name_and_type: ?*CP_NameAndType,
+    class: *CP_Class,
+    name_and_type: *CP_NameAndType,
 };
 
-const CP_NameAndType = struct {
+pub const CP_NameAndType = struct {
     name_index: u16,
     descriptor_index: u16,
 
-    name: ?*[]u8,
-    descriptor: ?*[]u8,
+    name: []u8,
+    descriptor: []u8,
 };
 
-const MethodInfo = struct {
-    access_flags: u16,
-    name: *[]u8,
-    descriptor: *[]u8,
+pub const CP_String = struct {
+    string_index: u16,
+    string: []u8,
+};
+
+pub const MethodInfo = struct {
+    access_flags: MethodAccessFlags,
+    name: []u8,
+    descriptor: []u8,
     attributes: []AttributeInfo,
 };
 
-const AttributeInfoTag = enum(u8) {
+pub const MethodAccessFlags = packed struct(u16) {
+    public: bool = false,
+    private: bool = false,
+    protected: bool = false,
+    static: bool = false,
+    final: bool = false,
+    synchronized: bool = false,
+    bridge: bool = false,
+    varargs: bool = false,
+    native: bool = false,
+    _: u1 = 0,
+    abstract: bool = false,
+    strict: bool = false,
+    synthetic: bool = false,
+    _1: u3 = 0,
+};
+
+pub const AttributeInfoTag = enum(u8) {
     ConstantValue = 0,
     Code = 1,
     Exceptions = 2,
@@ -392,7 +496,7 @@ const AttributeInfoTag = enum(u8) {
     LineNumberTable = 4,
 };
 
-const AttributeInfo = union(AttributeInfoTag) {
+pub const AttributeInfo = union(AttributeInfoTag) {
     ConstantValue: Attrib_ConstantValue,
     Code: Attrib_Code,
     Exceptions: Attrib_Exceptions,
@@ -400,19 +504,19 @@ const AttributeInfo = union(AttributeInfoTag) {
     LineNumberTable: []Attrib_LineNumberTable,
 };
 
-const Attrib_ConstantValue = struct {};
-const Attrib_Code = struct {
+pub const Attrib_ConstantValue = struct {};
+pub const Attrib_Code = struct {
     max_stack: u16,
     max_locals: u16,
     code: []opcodes.OpCode,
     exception_table: []u8, // TODO: Change from u8 to the actual struct
     attributes: []AttributeInfo,
 };
-const Attrib_Exceptions = struct {};
-const Attrib_SourceFile = struct {
+pub const Attrib_Exceptions = struct {};
+pub const Attrib_SourceFile = struct {
     sourcefile_index: u16,
 };
-const Attrib_LineNumberTable = struct {
+pub const Attrib_LineNumberTable = struct {
     start_pc: u16,
     line_number: u16,
 };

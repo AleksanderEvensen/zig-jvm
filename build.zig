@@ -23,7 +23,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const mod_javavm = b.addModule("java-vm", .{
+        .root_source_file = b.path("modules/java-vm/lib.zig"),
+        .optimize = optimize,
+        .target = target,
+        .imports = &.{
+            .{ .name = "java-parser", .module = mod_javap },
+        },
+    });
+
     exe.root_module.addImport("java-parser", mod_javap);
+    exe.root_module.addImport("java-vm", mod_javavm);
 
     // Add run command
     const run_cmd = b.addRunArtifact(exe);

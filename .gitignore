@@ -1,3 +1,6 @@
 .zig-cache/
 zig-out/
 java-out/
+java-runtime/
+tools/JRTExtractor.class
+tools/rt.zip
